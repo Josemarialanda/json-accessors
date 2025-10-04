@@ -263,8 +263,9 @@ e.g.
   inputs = {
     nixpkgs.url = "github:NixOS/nixpkgs/nixpkgs-unstable";
     flake-utils.url = "github:numtide/flake-utils";
+
+    # Import the json-accessors flake as a dependency
     json-accessors.url = "github:josemarialanda/json-accessors";
-    json-accessors.inputs.nixpkgs.follows = "nixpkgs";
   };
 
   outputs = { self, nixpkgs, flake-utils, json-accessors, ... }:
@@ -274,19 +275,27 @@ e.g.
           packageOverrides = hfinal: hprev:
             prev.haskell.packageOverrides hfinal hprev // {
               my-app = hfinal.callCabal2nix "my-app" ./. { };
-              json-accessors = hfinal.callCabal2nix "json-accessors" json-accessors { };
             };
         };
         my-app = final.haskell.lib.compose.justStaticExecutables final.haskellPackages.my-app;
       };
       perSystem = system:
         let
-          pkgs = import nixpkgs { inherit system; overlays = [ overlay ]; };
+          pkgs = import nixpkgs {
+            inherit system;
+            overlays = [
+              overlay
+              # Include json-accessors overlay
+              json-accessors.overlay
+            ];
+          };
           hspkgs = pkgs.haskellPackages;
         in
         {
           devShell = hspkgs.shellFor {
             withHoogle = true;
+
+            # Add json-accessors so it’s available for import in Haskell code (Cabal dependency)
             packages = p: [ p.my-app p.json-accessors ];
             buildInputs = [
               hspkgs.cabal-install
@@ -296,10 +305,11 @@ e.g.
               pkgs.bashInteractive
             ];
           };
+
           defaultPackage = pkgs.my-app;
         };
     in
-    { inherit overlay; } // 
+    { inherit overlay; } //
       flake-utils.lib.eachDefaultSystem perSystem;
 }
 ```
@@ -315,6 +325,20 @@ build-depends:
     json-accessors
 ```
 
+Note:
+Since `json-accessors` is not yet published on Hackage or Stackage,
+you must explicitly reference it in your `cabal.project` file so Cabal knows where to find it:
+
+```
+packages: .
+  ../json-accessors
+```
+
+(Adjust the path depending on where `json-accessors` is located relative to `my-app`)
+
+This allows Cabal to build and link against the local json-accessors source
+when using `cabal build` inside the nix dev shell.
+ 
 ### 3. Import and use
 
 ```haskell
