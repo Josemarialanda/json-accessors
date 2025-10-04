@@ -131,9 +131,32 @@ generateFromValue pathPrefix (A.Object obj) = do
   concat <$> forM (KM.toList obj) (\(k, v) -> do
     let key = T.unpack (Key.toText k)
     genField (pathPrefix <> [key]) v)
-generateFromValue pathPrefix (A.Array arr) = do
-  concat <$> forM (zip [0..] (V.toList arr)) (\(i, v) ->
-    genField (pathPrefix <> [show i]) v)
+generateFromValue pathPrefix (A.Array arr)
+  | V.null arr = pure []
+  | otherwise = do
+      let elems = V.toList arr
+      case elems of
+        (A.Object o : _) -> do
+          -- 1. element-wise accessors
+          indexed <- concat <$> forM (zip [(0 :: Int)..] elems) (\(i, v) ->
+            genField (pathPrefix <> [show i]) v)
+          -- 2. collector accessors per key
+          let objKeys = KM.keys o
+          collectors <- concat <$> forM objKeys (\k -> do
+            let keyTxt = T.unpack (Key.toText k)
+                fullPath = pathPrefix <> [keyTxt]
+                sampleVal = KM.lookup k o
+            case sampleVal of
+              Just (A.String _) ->
+                mkCollector fullPath [t| [String] |] [| fmap unpackString |]
+              Just (A.Number _) ->
+                mkCollector fullPath [t| [Double] |] [| fmap numberToDouble |]
+              Just (A.Bool _) ->
+                mkCollector fullPath [t| [Bool] |] [| fmap unpackBool |]
+              _ -> mkCollector fullPath [t| [A.Value] |] [| id |])
+          pure (indexed <> collectors)
+        (x : _) -> genField pathPrefix x
+        [] -> pure []
 generateFromValue _ _ = pure []
 
 --------------------------------------------------------------------------------
@@ -178,6 +201,18 @@ mkGetter fullPath typ conv = do
   fun <- funD funName [clause [] (normalB body) []]
   pure [sig, fun]
 
+-- | Generate a collector accessor function (aggregates over list of objects)
+mkCollector :: [String] -> Q Type -> Q Exp -> Q [Dec]
+mkCollector fullPath typ conv = do
+  let funName = mkName (concatPath fullPath)
+      body = [| \ctx ->
+                 let vals = collectValues $(pathExpr fullPath) (unJsonCtx ctx)
+                 in $(conv) vals
+              |]
+  sig <- sigD funName [t| JsonCtx -> $typ |]
+  fun <- funD funName [clause [] (normalB body) []]
+  pure [sig, fun]
+
 --------------------------------------------------------------------------------
 -- | Extract nested key path from JSON
 --------------------------------------------------------------------------------
@@ -197,6 +232,17 @@ extract (A.Array arr) (k:ks)
         then extract (arr V.! i) ks
         else error ("Array index out of bounds: " <> show i)
 extract _ _ = error "Invalid path"
+
+-- | Collect all values of a given field key across all elements in a nested array of objects.
+collectValues :: [T.Text] -> A.Value -> [A.Value]
+collectValues [] v = [v]
+collectValues (k:ks) (A.Object o) =
+  case KM.lookup (Key.fromText k) o of
+    Just v' -> collectValues ks v'
+    Nothing -> concatMap (collectValues (k:ks)) (KM.elems o)
+collectValues (k:ks) (A.Array arr) =
+  concatMap (collectValues (k:ks)) (V.toList arr)
+collectValues _ _ = []
 
 --------------------------------------------------------------------------------
 -- | Conversion helpers
